@@ -20,9 +20,11 @@ jobs:
       - name: Show Swift version
         run: swift --version
 
+      - name: Install Python test dependencies
+        run: python3 -m pip install --user PyYAML
+
       - name: Test
         run: swift test
 
       - name: Build app bundle
         run: HERMES_MAC_ARCHS=arm64 ./scripts/build-macos-app.sh
-
