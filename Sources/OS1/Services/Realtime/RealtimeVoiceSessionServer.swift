@@ -1,20 +1,61 @@
 import Foundation
+#if os(macOS)
 import Network
+#else
+import NIO
+import NIOHTTP1
+#endif
 
-final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
-    @Published private(set) var endpointURL: URL?
-    @Published private(set) var statusText: String = "Stopped"
-    @Published private(set) var lastError: String?
+#if os(macOS)
+import Combine
+#endif
 
-    private let queue = DispatchQueue(label: "com.elementsoftware.os1.realtime-voice")
-    private var listener: NWListener?
-    private var apiKey: String?
+public final class RealtimeVoiceSessionServer: @unchecked Sendable {
+    #if os(macOS)
+    public let objectWillChange = ObservableObjectPublisher()
+    #endif
+
+    public private(set) var endpointURL: URL? {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public private(set) var statusText: String = "Stopped" {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public private(set) var lastError: String? {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+
     private let openAIAPIKeyProvider: @Sendable () -> String?
     private let orgoMCPBridge: RealtimeOrgoMCPBridge
+    private var apiKey: String?
 
-    init(
+    #if os(macOS)
+    private let queue = DispatchQueue(label: "com.elementsoftware.os1.realtime-voice")
+    private var listener: NWListener?
+    #else
+    private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+    private var channel: Channel?
+    #endif
+
+    public init(
         openAIAPIKeyProvider: @escaping @Sendable () -> String? = {
-            ProcessInfo.processInfo.environment["OPENAI_API_KEY"]
+            #if os(macOS)
+            return nil // In AppState we pass a provider that reads from Keychain
+            #else
+            return ProcessInfo.processInfo.environment["OPENAI_API_KEY"]
+            #endif
         },
         orgoAPIKeyProvider: @escaping @Sendable () -> String? = {
             ProcessInfo.processInfo.environment["ORGO_API_KEY"]
@@ -30,22 +71,49 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         )
     }
 
+    #if os(macOS)
     deinit {
         listener?.cancel()
     }
+    #endif
 
-    func start() {
+    public func start() {
+        #if os(macOS)
         guard listener == nil else { return }
+        #else
+        guard channel == nil else { return }
+        #endif
 
         guard let apiKey = openAIAPIKeyProvider()?.trimmingCharacters(in: .whitespacesAndNewlines), !apiKey.isEmpty else {
             endpointURL = nil
             statusText = "OPENAI_API_KEY missing"
-            lastError = "Connect OpenAI on the Providers tab or set OPENAI_API_KEY before launching OS1 to use Realtime voice mode."
+            lastError = "Connect OpenAI or set OPENAI_API_KEY before launching to use Realtime voice mode."
             return
         }
 
         self.apiKey = apiKey
 
+        #if os(macOS)
+        startmacOS(apiKey: apiKey)
+        #else
+        startLinux(apiKey: apiKey)
+        #endif
+    }
+
+    public func stop() {
+        #if os(macOS)
+        listener?.cancel()
+        listener = nil
+        #else
+        try? channel?.close().wait()
+        channel = nil
+        #endif
+        endpointURL = nil
+        statusText = "Stopped"
+    }
+
+    #if os(macOS)
+    private func startmacOS(apiKey: String) {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
@@ -67,13 +135,6 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
             statusText = "Failed to start voice endpoint"
             lastError = error.localizedDescription
         }
-    }
-
-    func stop() {
-        listener?.cancel()
-        listener = nil
-        endpointURL = nil
-        statusText = "Stopped"
     }
 
     private func handleListenerState(_ state: NWListener.State) {
@@ -114,32 +175,26 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
                 connection.cancel()
                 return
             }
-
             if let error {
                 self.send(.plain(status: 400, body: "Request receive failed: \(error.localizedDescription)"), on: connection)
                 return
             }
-
             var requestData = buffered
             if let data {
                 requestData.append(data)
             }
-
             if requestData.count > 1_000_000 {
                 self.send(.plain(status: 413, body: "Request body too large"), on: connection)
                 return
             }
-
             if let request = HTTPRequest(data: requestData) {
                 self.route(request, on: connection)
                 return
             }
-
             if isComplete {
                 self.send(.plain(status: 400, body: "Incomplete HTTP request"), on: connection)
                 return
             }
-
             self.receive(from: connection, buffered: requestData)
         }
     }
@@ -158,12 +213,10 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
                 send(.plain(status: 400, body: "Expected raw SDP body"), on: connection)
                 return
             }
-
             guard let apiKey else {
                 send(.plain(status: 500, body: "OPENAI_API_KEY is not configured"), on: connection)
                 return
             }
-
             Task { [weak self] in
                 let response = await self?.createRealtimeCall(sdp: sdp, apiKey: apiKey) ?? .plain(status: 500, body: "Voice server unavailable")
                 self?.send(response, on: connection)
@@ -175,7 +228,6 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
                 send(.plain(status: 400, body: "Expected Orgo MCP tool call JSON"), on: connection)
                 return
             }
-
             let arguments = payload["arguments"] as? [String: Any] ?? [:]
             Task { [weak self] in
                 let response = await self?.callToolResponse(name: name, arguments: arguments) ?? .plain(status: 500, body: "Voice server unavailable")
@@ -183,71 +235,6 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
             }
         default:
             send(.plain(status: 404, body: "Not found"), on: connection)
-        }
-    }
-
-    private func listToolsResponse() async -> HTTPResponse {
-        guard orgoMCPBridge.isConfigured else {
-            return Self.jsonResponse(RealtimeToolsResponse(
-                tools: [],
-                orgo: RealtimeOrgoStatus(enabled: false, status: "Orgo MCP unavailable: missing API key or Node runtime")
-            ))
-        }
-
-        do {
-            let tools = try await orgoMCPBridge.listRealtimeTools()
-            return Self.jsonResponse(RealtimeToolsResponse(
-                tools: tools,
-                orgo: RealtimeOrgoStatus(enabled: true, status: "Orgo MCP ready: \(tools.count) tools")
-            ))
-        } catch {
-            return Self.jsonResponse(
-                RealtimeToolsResponse(
-                    tools: [],
-                    orgo: RealtimeOrgoStatus(enabled: false, status: error.localizedDescription)
-                ),
-                status: 502
-            )
-        }
-    }
-
-    private func callToolResponse(name: String, arguments: [String: Any]) async -> HTTPResponse {
-        do {
-            let result = try await orgoMCPBridge.callTool(name: name, arguments: arguments)
-            return Self.jsonResponse(result)
-        } catch {
-            return Self.jsonResponse(
-                RealtimeOrgoMCPCallResult(
-                    isError: true,
-                    content: AnyEncodable([["type": "text", "text": error.localizedDescription]])
-                ),
-                status: 502
-            )
-        }
-    }
-
-    private func createRealtimeCall(sdp: String, apiKey: String) async -> HTTPResponse {
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/realtime/calls")!)
-        let multipart = RealtimeCallsMultipartRequest.make(sdp: sdp, session: Self.sessionConfig)
-
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(multipart.contentType, forHTTPHeaderField: "Content-Type")
-
-        do {
-            let (data, response) = try await URLSession.shared.upload(for: request, from: multipart.body)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return .plain(status: 502, body: "OpenAI returned a non-HTTP response")
-            }
-
-            if (200..<300).contains(httpResponse.statusCode) {
-                return HTTPResponse(status: httpResponse.statusCode, contentType: "application/sdp", body: data)
-            }
-
-            let body = String(data: data, encoding: .utf8) ?? "OpenAI Realtime call setup failed"
-            return .plain(status: httpResponse.statusCode, body: body)
-        } catch {
-            return .plain(status: 502, body: error.localizedDescription)
         }
     }
 
@@ -260,10 +247,164 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         payload.appendString("Connection: close\r\n")
         payload.appendString("\r\n")
         payload.append(response.body)
-
         connection.send(content: payload, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+    #else
+    private func startLinux(apiKey: String) {
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.backlog, value: 256)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.configureHTTPServerPipeline().flatMap {
+                    channel.pipeline.addHandler(HTTPHandler(server: self))
+                }
+            }
+            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+
+        do {
+            let channel = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
+            self.channel = channel
+            if let localAddress = channel.localAddress, let port = localAddress.port {
+                self.endpointURL = URL(string: "http://127.0.0.1:\(port)/")
+                self.statusText = "Voice endpoint ready"
+            }
+        } catch {
+            statusText = "Failed to start voice endpoint"
+            lastError = error.localizedDescription
+        }
+    }
+
+    fileprivate func routeLinux(
+        method: HTTPMethod,
+        path: String,
+        body: Data,
+        context: ChannelHandlerContext
+    ) {
+        Task {
+            let response: LinuxHTTPResponse
+            switch (method, path) {
+            case (.GET, "/"), (.GET, "/index.html"):
+                response = .html(status: .ok, body: Self.voiceHTML)
+            case (.GET, "/tools"):
+                let res = await self.listToolsResponse()
+                response = LinuxHTTPResponse(status: res.status == 200 ? .ok : .internalServerError, contentType: res.contentType, body: res.body)
+            case (.POST, "/session"):
+                let res = await self.handleSessionRequestLinux(body: body)
+                response = res
+            case (.POST, "/tool"):
+                let res = await self.handleToolRequestLinux(body: body)
+                response = res
+            default:
+                response = .plain(status: .notFound, body: "Not found")
+            }
+            self.sendResponseLinux(response, to: context)
+        }
+    }
+
+    private func handleSessionRequestLinux(body: Data) async -> LinuxHTTPResponse {
+        guard let sdp = String(data: body, encoding: .utf8), !sdp.isEmpty else {
+            return .plain(status: .badRequest, body: "Expected SDP")
+        }
+        guard let apiKey = self.apiKey else {
+            return .plain(status: .internalServerError, body: "API key missing")
+        }
+        let res = await self.createRealtimeCall(sdp: sdp, apiKey: apiKey)
+        return LinuxHTTPResponse(status: HTTPResponseStatus(statusCode: res.status), contentType: res.contentType, body: res.body)
+    }
+
+    private func handleToolRequestLinux(body: Data) async -> LinuxHTTPResponse {
+        guard let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let name = payload["name"] as? String else {
+            return .plain(status: .badRequest, body: "Invalid JSON")
+        }
+        let arguments = payload["arguments"] as? [String: Any] ?? [:]
+        let res = await self.callToolResponse(name: name, arguments: arguments)
+        return LinuxHTTPResponse(status: res.status == 200 ? .ok : .badGateway, contentType: res.contentType, body: res.body)
+    }
+
+    private func sendResponseLinux(_ response: LinuxHTTPResponse, to context: ChannelHandlerContext) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: response.contentType)
+        headers.add(name: "Content-Length", value: "\(response.body.count)")
+        headers.add(name: "Connection", value: "close")
+        let head = HTTPResponseHead(version: .http1_1, status: response.status, headers: headers)
+        context.write(NIOAny(HTTPServerResponsePart.head(head)), promise: nil)
+        var buffer = context.channel.allocator.buffer(capacity: response.body.count)
+        buffer.writeBytes(response.body)
+        context.write(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
+        context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: nil).whenComplete { _ in
+            context.close(promise: nil)
+        }
+    }
+
+    private final class HTTPHandler: ChannelInboundHandler {
+        typealias InboundIn = HTTPServerRequestPart
+        let server: RealtimeVoiceSessionServer
+        var head: HTTPRequestHead?
+        var bodyData = Data()
+        init(server: RealtimeVoiceSessionServer) { self.server = server }
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            let part = unwrapInboundIn(data)
+            switch part {
+            case .head(let head): self.head = head
+            case .body(var buffer): if let bytes = buffer.readBytes(length: buffer.readableBytes) { bodyData.append(contentsOf: bytes) }
+            case .end: if let head = self.head { server.routeLinux(method: head.method, path: head.uri, body: bodyData, context: context) }
+            }
+        }
+    }
+
+    private struct LinuxHTTPResponse {
+        let status: HTTPResponseStatus
+        let contentType: String
+        let body: Data
+        static func html(status: HTTPResponseStatus, body: String) -> LinuxHTTPResponse { LinuxHTTPResponse(status: status, contentType: "text/html; charset=utf-8", body: Data(body.utf8)) }
+        static func plain(status: HTTPResponseStatus, body: String) -> LinuxHTTPResponse { LinuxHTTPResponse(status: status, contentType: "text/plain; charset=utf-8", body: Data(body.utf8)) }
+        static func json<T: Encodable>(_ value: T, status: HTTPResponseStatus = .ok) -> LinuxHTTPResponse { let data = (try? JSONEncoder().encode(value)) ?? Data(); return LinuxHTTPResponse(status: status, contentType: "application/json; charset=utf-8", body: data) }
+    }
+    #endif
+
+    private func listToolsResponse() async -> HTTPResponse {
+        guard orgoMCPBridge.isConfigured else {
+            return .json(RealtimeToolsResponse(
+                tools: [],
+                orgo: RealtimeOrgoStatus(enabled: false, status: "Orgo MCP unavailable: missing API key or Node runtime")
+            ))
+        }
+        do {
+            let tools = try await orgoMCPBridge.listRealtimeTools()
+            return .json(RealtimeToolsResponse(
+                tools: tools,
+                orgo: RealtimeOrgoStatus(enabled: true, status: "Orgo MCP ready: \(tools.count) tools")
+            ))
+        } catch {
+            return .json(RealtimeToolsResponse(tools: [], orgo: RealtimeOrgoStatus(enabled: false, status: error.localizedDescription)), status: 502)
+        }
+    }
+
+    private func callToolResponse(name: String, arguments: [String: Any]) async -> HTTPResponse {
+        do {
+            let result = try await orgoMCPBridge.callTool(name: name, arguments: arguments)
+            return .json(result)
+        } catch {
+            return .json(RealtimeOrgoMCPCallResult(isError: true, content: AnyEncodable([["type": "text", "text": error.localizedDescription]])), status: 502)
+        }
+    }
+
+    private func createRealtimeCall(sdp: String, apiKey: String) async -> HTTPResponse {
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/realtime/calls")!)
+        let multipart = RealtimeCallsMultipartRequest.make(sdp: sdp, session: Self.sessionConfig)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(multipart.contentType, forHTTPHeaderField: "Content-Type")
+        do {
+            let (data, response) = try await URLSession.shared.upload(for: request, from: multipart.body)
+            guard let httpResponse = response as? HTTPURLResponse else { return .plain(status: 502, body: "OpenAI returned a non-HTTP response") }
+            if (200..<300).contains(httpResponse.statusCode) { return HTTPResponse(status: httpResponse.statusCode, contentType: "application/sdp", body: data) }
+            let body = String(data: data, encoding: .utf8) ?? "OpenAI Realtime call setup failed"
+            return .plain(status: httpResponse.statusCode, body: body)
+        } catch { return .plain(status: 502, body: error.localizedDescription) }
     }
 
     private static func jsonResponse<T: Encodable>(_ value: T, status: Int = 200) -> HTTPResponse {
@@ -279,16 +420,9 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         let session: [String: Any] = [
             "type": "realtime",
             "model": "gpt-realtime-2",
-            "audio": [
-                "output": [
-                    "voice": "marin",
-                ],
-            ],
-            "instructions": """
-            You are OS1 voice mode. Keep spoken replies short and operational. You can use the sample check_calendar function when the user asks whether a date and time is available. When Orgo MCP tools are registered, use them to inspect and control Orgo cloud computers.
-            """,
+            "audio": ["output": ["voice": "marin"]],
+            "instructions": "You are OS1 voice mode. Keep spoken replies short and operational. You can use the sample check_calendar function when the user asks whether a date and time is available. When Orgo MCP tools are registered, use them to inspect and control Orgo cloud computers."
         ]
-
         let data = try! JSONSerialization.data(withJSONObject: session, options: [])
         return String(data: data, encoding: .utf8)!
     }()
@@ -734,24 +868,21 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
     """
 }
 
+#if os(macOS)
 private struct HTTPRequest {
     let method: String
     let path: String
     let headers: [String: String]
     let body: Data
-
     init?(data: Data) {
         let marker = Data("\r\n\r\n".utf8)
         guard let headerRange = data.range(of: marker) else { return nil }
-
         let headerData = data[..<headerRange.lowerBound]
         guard let headerText = String(data: headerData, encoding: .utf8) else { return nil }
-
         let lines = headerText.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else { return nil }
         let requestParts = requestLine.split(separator: " ", maxSplits: 2).map(String.init)
         guard requestParts.count >= 2 else { return nil }
-
         var headers: [String: String] = [:]
         for line in lines.dropFirst() {
             guard let separator = line.firstIndex(of: ":") else { continue }
@@ -759,49 +890,35 @@ private struct HTTPRequest {
             let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
             headers[name] = value
         }
-
         let contentLength = Int(headers["content-length"] ?? "0") ?? 0
         let bodyStart = headerRange.upperBound
         guard data.count >= bodyStart + contentLength else { return nil }
-
         method = requestParts[0].uppercased()
         path = String(requestParts[1].split(separator: "?", maxSplits: 1).first ?? "/")
         self.headers = headers
         body = Data(data[bodyStart..<(bodyStart + contentLength)])
     }
 }
+#endif
 
 private struct HTTPResponse {
     let status: Int
     let contentType: String
     let body: Data
-
     var reasonPhrase: String {
         switch status {
-        case 200..<300:
-            "OK"
-        case 400:
-            "Bad Request"
-        case 404:
-            "Not Found"
-        case 413:
-            "Payload Too Large"
-        case 500:
-            "Internal Server Error"
-        case 502:
-            "Bad Gateway"
-        default:
-            "HTTP"
+        case 200..<300: return "OK"
+        case 400: return "Bad Request"
+        case 404: return "Not Found"
+        case 413: return "Payload Too Large"
+        case 500: return "Internal Server Error"
+        case 502: return "Bad Gateway"
+        default: return "HTTP"
         }
     }
-
-    static func html(status: Int, body: String) -> HTTPResponse {
-        HTTPResponse(status: status, contentType: "text/html; charset=utf-8", body: Data(body.utf8))
-    }
-
-    static func plain(status: Int, body: String) -> HTTPResponse {
-        HTTPResponse(status: status, contentType: "text/plain; charset=utf-8", body: Data(body.utf8))
-    }
+    static func html(status: Int, body: String) -> HTTPResponse { HTTPResponse(status: status, contentType: "text/html; charset=utf-8", body: Data(body.utf8)) }
+    static func plain(status: Int, body: String) -> HTTPResponse { HTTPResponse(status: status, contentType: "text/plain; charset=utf-8", body: Data(body.utf8)) }
+    static func json<T: Encodable>(_ value: T, status: Int = 200) -> HTTPResponse { let data = (try? JSONEncoder().encode(value)) ?? Data(); return HTTPResponse(status: status, contentType: "application/json; charset=utf-8", body: data) }
 }
 
 private struct RealtimeToolsResponse: Encodable {

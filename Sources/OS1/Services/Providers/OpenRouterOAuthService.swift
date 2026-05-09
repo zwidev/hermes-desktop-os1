@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import CryptoKit
 import Foundation
 
@@ -75,7 +77,9 @@ final class OpenRouterOAuthService {
     init(
         urlSession: URLSession = .shared,
         urlOpener: @escaping @MainActor (URL) -> Void = { url in
+            #if os(macOS)
             NSWorkspace.shared.open(url)
+            #endif
         }
     ) {
         self.urlSession = urlSession

@@ -1,43 +1,14 @@
 import Foundation
-import Security
 
-/// Per-Mac Keychain wrapper for the user's LLM provider API keys.
-///
-/// One key per (host × provider). Storage is sliced two ways:
-///   - profile-scoped slot — `<profileId>.<providerSlug>` Keychain
-///     account, so one connection's OpenAI key doesn't leak into another
-///     host config.
-///   - default slot — `default.<providerSlug>`, the Mac-level fallback
-///     for users who reuse the same provider key across all of their
-///     own VMs (the common case — most people have one OpenAI key).
-///
-/// Resolution order on read:
-///   1. Profile-scoped slot — strict per-host
-///   2. Default slot — Mac-level fallback
-///
-/// Mirrors `ComposioCredentialStore` deliberately so the two stores
-/// behave identically when wiring the same `ConnectionProfile.id` and
-/// `MacKey ↔ HostKey` semantics.
+/// Per-Mac wrapper for the user's LLM provider API keys.
 final class ProviderCredentialStore: @unchecked Sendable {
-    enum CredentialError: LocalizedError {
-        case saveFailed(OSStatus)
-        case deleteFailed(OSStatus)
-
-        var errorDescription: String? {
-            switch self {
-            case .saveFailed(let status):
-                return "Couldn't save the provider API key to Keychain (status \(status))."
-            case .deleteFailed(let status):
-                return "Couldn't remove the provider API key from Keychain (status \(status))."
-            }
-        }
-    }
-
     static let defaultProfileToken = "default"
 
+    private let store: any CredentialStore
     private let service: String
 
-    init(service: String = "ai.os1.provider-key") {
+    init(store: any CredentialStore, service: String = "ai.os1.provider-key") {
+        self.store = store
         self.service = service
     }
 
@@ -58,13 +29,12 @@ final class ProviderCredentialStore: @unchecked Sendable {
     }
 
     /// True if there's a profile-scoped key (regardless of default).
-    /// Lets the UI render "host-scoped" vs "Mac default" badges.
     func hasProfileScopedKey(slug: String, profileId: String) -> Bool {
         readKey(account: account(profileToken: profileId, slug: slug)) != nil
     }
 
     /// Map of slug → has-any-key, used for rendering the provider list
-    /// without N round-trips. Cheap (one Keychain read per provider).
+    /// without N round-trips.
     func loadConnectionStatuses(forProfileId profileId: String?) -> [String: Bool] {
         var result: [String: Bool] = [:]
         for entry in ProviderCatalog.entries {
@@ -99,71 +69,19 @@ final class ProviderCredentialStore: @unchecked Sendable {
 
     // MARK: - Internals
 
-    /// Composite account: `<profileToken>.<slug>` keeps the Keychain
-    /// flat (one service) so SecItemDelete on app uninstall wipes them
-    /// all at once, while still namespacing per host and per provider.
     private func account(profileToken: String, slug: String) -> String {
         "\(profileToken).\(slug)"
     }
 
     private func readKey(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let key = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        store.load(service: service, account: account)
     }
 
     private func saveKey(_ apiKey: String, account: String) throws {
-        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            try deleteKey(account: account)
-            return
-        }
-        let data = Data(trimmed.utf8)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        switch updateStatus {
-        case errSecSuccess:
-            return
-        case errSecItemNotFound:
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw CredentialError.saveFailed(addStatus)
-            }
-        default:
-            throw CredentialError.saveFailed(updateStatus)
-        }
+        try store.save(apiKey, service: service, account: account)
     }
 
     private func deleteKey(account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        if status != errSecSuccess && status != errSecItemNotFound {
-            throw CredentialError.deleteFailed(status)
-        }
+        try store.delete(service: service, account: account)
     }
 }

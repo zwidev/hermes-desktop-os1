@@ -1,32 +1,50 @@
 import Foundation
+#if canImport(Combine)
+import Combine
+#endif
 
-@MainActor
-final class TerminalWorkspaceStore: ObservableObject {
-    @Published private(set) var tabs: [TerminalTabModel] = []
-    @Published var selectedTabID: UUID?
+public final class TerminalWorkspaceStore: @unchecked Sendable {
+    #if os(macOS)
+    public let objectWillChange = ObservableObjectPublisher()
+    #endif
+
+    public var tabs: [TerminalTabModel] = [] {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public var selectedTabID: UUID? {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
 
     private let sshTransport: SSHTransport
     private let orgoTransport: OrgoTransport
 
-    init(sshTransport: SSHTransport, orgoTransport: OrgoTransport) {
+    public init(sshTransport: SSHTransport, orgoTransport: OrgoTransport) {
         self.sshTransport = sshTransport
         self.orgoTransport = orgoTransport
     }
 
-    var selectedTab: TerminalTabModel? {
+    public var selectedTab: TerminalTabModel? {
         guard let selectedTabID else { return nil }
         return tabs.first(where: { $0.id == selectedTabID })
     }
 
-    var hasTabs: Bool {
+    public var hasTabs: Bool {
         !tabs.isEmpty
     }
 
-    func selectTab(_ tabID: UUID?) {
+    public func selectTab(_ tabID: UUID?) {
         selectedTabID = tabID
     }
 
-    func ensureInitialTab(for connection: ConnectionProfile) {
+    public func ensureInitialTab(for connection: ConnectionProfile) {
         if let existingTab = existingTab(for: connection.workspaceScopeFingerprint) {
             selectTab(existingTab.id)
         } else {
@@ -35,12 +53,12 @@ final class TerminalWorkspaceStore: ObservableObject {
     }
 
     @discardableResult
-    func addCommandTab(for connection: ConnectionProfile, commandLine: String) -> TerminalTabModel {
+    public func addCommandTab(for connection: ConnectionProfile, commandLine: String) -> TerminalTabModel {
         addTab(for: connection, startupCommandLine: commandLine)
     }
 
     @discardableResult
-    func addTab(for connection: ConnectionProfile, startupCommandLine: String? = nil) -> TerminalTabModel {
+    public func addTab(for connection: ConnectionProfile, startupCommandLine: String? = nil) -> TerminalTabModel {
         let session = TerminalSession(
             connection: connection,
             sshTransport: sshTransport,
@@ -59,7 +77,7 @@ final class TerminalWorkspaceStore: ObservableObject {
         return tab
     }
 
-    func closeTab(_ tab: TerminalTabModel) {
+    public func closeTab(_ tab: TerminalTabModel) {
         if selectedTabID == tab.id {
             selectTab(tabs.last(where: { $0.id != tab.id })?.id)
         }
@@ -67,7 +85,7 @@ final class TerminalWorkspaceStore: ObservableObject {
         tab.session.stop()
     }
 
-    func closeAllTabs() {
+    public func closeAllTabs() {
         for tab in tabs {
             tab.session.stop()
         }
@@ -75,7 +93,7 @@ final class TerminalWorkspaceStore: ObservableObject {
         selectTab(nil)
     }
 
-    func closeTabs(forConnectionID connectionID: UUID) {
+    public func closeTabs(forConnectionID connectionID: UUID) {
         let removedTabs = tabs.filter { $0.connectionID == connectionID }
         let removedTabIDs = Set(removedTabs.map(\.id))
 
@@ -94,3 +112,7 @@ final class TerminalWorkspaceStore: ObservableObject {
         tabs.last(where: { $0.workspaceScopeFingerprint == workspaceScopeFingerprint })
     }
 }
+
+#if os(macOS)
+extension TerminalWorkspaceStore: ObservableObject {}
+#endif

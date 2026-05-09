@@ -1,18 +1,60 @@
 import Foundation
+#if canImport(Combine)
+import Combine
+#endif
 
-@MainActor
-final class TerminalSession: ObservableObject, @unchecked Sendable {
-    let connection: ConnectionProfile
+public final class TerminalSession: @unchecked Sendable {
+    #if os(macOS)
+    public let objectWillChange = ObservableObjectPublisher()
+    #endif
+
+    public let connection: ConnectionProfile
     private let driver: any TerminalDriver
 
-    @Published var terminalTitle: String
-    @Published var currentDirectory: String?
-    @Published var exitCode: Int32?
-    @Published var didStart = false
-    @Published private(set) var launchToken = UUID()
-    @Published private(set) var isRunning = false
+    public var terminalTitle: String {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public var currentDirectory: String? {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public var exitCode: Int32? {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public var didStart = false {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public private(set) var launchToken = UUID() {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
+    public private(set) var isRunning = false {
+        didSet {
+            #if os(macOS)
+            objectWillChange.send()
+            #endif
+        }
+    }
 
-    init(
+    public init(
         connection: ConnectionProfile,
         sshTransport: SSHTransport,
         orgoTransport: OrgoTransport,
@@ -55,29 +97,30 @@ final class TerminalSession: ObservableObject, @unchecked Sendable {
         driver.terminate()
     }
 
-    func markStarted() {
+    public func markStarted() {
         didStart = true
         isRunning = true
         exitCode = nil
     }
 
-    func updateTitle(_ title: String) {
+    public func updateTitle(_ title: String) {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         terminalTitle = title
     }
 
-    func markExited(_ code: Int32?) {
+    public func markExited(_ code: Int32?) {
         isRunning = false
         exitCode = code
     }
 
-    func requestReconnect() {
+    public func requestReconnect() {
         currentDirectory = nil
         exitCode = nil
         launchToken = UUID()
     }
 
-    func mount(in container: TerminalMountContainerView, appearance: TerminalThemeAppearance, isActive: Bool) {
+    #if os(macOS)
+    public func mount(in container: TerminalMountContainerView, appearance: TerminalThemeAppearance, isActive: Bool) {
         driver.mount(
             in: container,
             appearance: appearance,
@@ -86,13 +129,18 @@ final class TerminalSession: ObservableObject, @unchecked Sendable {
         )
     }
 
-    func unmount(from container: TerminalMountContainerView) {
+    public func unmount(from container: TerminalMountContainerView) {
         driver.unmount(from: container)
     }
+    #endif
 
-    func stop() {
+    public func stop() {
         driver.terminate()
         isRunning = false
         currentDirectory = nil
     }
 }
+
+#if os(macOS)
+extension TerminalSession: ObservableObject {}
+#endif
