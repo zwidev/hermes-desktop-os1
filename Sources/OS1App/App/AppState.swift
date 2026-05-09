@@ -3,10 +3,7 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Lock-protected snapshot of the active connection's UUID. Mirrors
-/// `AppState.activeConnectionID` so `@Sendable` closures (HTTP clients,
-/// etc.) can read the current host without crossing the main actor on
-/// every call.
+/// Lock-protected snapshot of the active connection's UUID.
 final class ActiveConnectionSnapshot: @unchecked Sendable {
     private let lock = NSLock()
     private var value: UUID?
@@ -155,8 +152,15 @@ final class AppState: ObservableObject {
     init() {
         let paths = AppPaths()
         let connectionStore = ConnectionStore(paths: paths)
+
+        #if os(macOS)
+        let primaryStore = KeychainCredentialStore()
+        #else
+        let primaryStore = FileCredentialStore(rootURL: paths.applicationSupportURL.appendingPathComponent("credentials"))
+        #endif
+
         let sshTransport = SSHTransport(paths: paths)
-        let orgoCredentialStore = OrgoCredentialStore()
+        let orgoCredentialStore = OrgoCredentialStore(store: primaryStore)
         let orgoApiKeyProvider: @Sendable () -> String? = { [weak orgoCredentialStore] in
             orgoCredentialStore?.loadAPIKey()
         }
@@ -189,7 +193,7 @@ final class AppState: ObservableObject {
             sshTransport: sshTransport,
             orgoTransport: orgoTransport
         )
-        let credentialStore = AgentMailCredentialStore()
+        let credentialStore = AgentMailCredentialStore(store: primaryStore)
         let accountStore = AgentMailAccountStore()
         let agentMailVMScanner = AgentMailVMScanner(
             orgoTransport: orgoTransport,
@@ -211,17 +215,11 @@ final class AppState: ObservableObject {
             realtimeService: agentMailRealtime
         )
 
-        let composioCredentialStore = ComposioCredentialStore()
+        let composioCredentialStore = ComposioCredentialStore(store: primaryStore)
         let composioVMInstaller = ComposioVMInstaller(
             orgoTransport: orgoTransport,
             multiplexed: transport
         )
-        // Provider reads the active connection from a thread-safe
-        // snapshot at call time and resolves its profile-scoped key
-        // (with default fallback). Means every Composio API call
-        // automatically targets the right key for whichever host is
-        // currently selected — no explicit swap step needed when the
-        // user changes connections.
         let snapshot = activeConnectionSnapshot
         let composioAPIKeyProvider: @Sendable () -> String? = { [weak composioCredentialStore] in
             guard let composioCredentialStore else { return nil }
@@ -240,15 +238,11 @@ final class AppState: ObservableObject {
             installer: composioVMInstaller,
             toolkitService: composioToolkitService,
             urlOpener: { url in
-                // Composio OAuth flows happen in the user's default
-                // browser. We discard the success Bool — the polling
-                // loop that follows tells us whether the user actually
-                // completed the auth.
                 _ = NSWorkspace.shared.open(url)
             }
         )
 
-        let providerCredentialStore = ProviderCredentialStore()
+        let providerCredentialStore = ProviderCredentialStore(store: primaryStore)
         let providerVMInstaller = ProviderVMInstaller(
             orgoTransport: orgoTransport,
             multiplexed: transport
@@ -262,15 +256,11 @@ final class AppState: ObservableObject {
             installer: providerVMInstaller,
             oauthService: openRouterOAuthService,
             urlOpener: { url in
-                // Provider dashboard "Get key" links open in the
-                // default browser; the OAuth dance for OpenRouter is
-                // handled inside OpenRouterOAuthService directly so
-                // we don't need a separate hop here.
                 _ = NSWorkspace.shared.open(url)
             }
         )
 
-        let telegramCredentialStore = TelegramCredentialStore()
+        let telegramCredentialStore = TelegramCredentialStore(store: primaryStore)
         let telegramVMInstaller = TelegramVMInstaller(
             orgoTransport: orgoTransport,
             multiplexed: transport
@@ -286,11 +276,6 @@ final class AppState: ObservableObject {
             telegramInstaller: telegramVMInstaller,
             hermesUpdater: hermesUpdater
         )
-        // Wire DoctorViewModel <-> AppState bridge after both exist:
-        // when Doctor probes availability it forwards the result to
-        // AppState (so the Overview banner sees the same value), and
-        // its Update action calls AppState.performHermesUpdate so the
-        // running spinner shows on both surfaces.
         self.doctorViewModel.bindHermesUpdateBridge(
             performUpdate: { [weak self] in
                 await self?.performHermesUpdate()
@@ -320,9 +305,6 @@ final class AppState: ObservableObject {
         self.activeConnectionID = connectionStore.lastConnectionID
         self.activeConnectionSnapshot.set(self.activeConnectionID)
 
-        // Mirror future changes into the Sendable snapshot so credential
-        // providers running off the main actor (URLSession callbacks,
-        // background tasks) always see a fresh value.
         $activeConnectionID
             .sink { [weak self] newId in
                 self?.activeConnectionSnapshot.set(newId)
@@ -431,7 +413,6 @@ final class AppState: ObservableObject {
     func isSectionAvailable(_ section: AppSection) -> Bool {
         if section == .connections { return true }
         guard let connection = activeConnection else { return false }
-        // Desktop (VNC) is only meaningful for Orgo VMs.
         if section == .desktop {
             if case .orgo = connection.transport { return true }
             return false
@@ -675,10 +656,6 @@ final class AppState: ObservableObject {
             if manual {
                 isRefreshingOverview = false
             }
-            // Piggyback the update check off discovery — it's the natural
-            // moment to learn the host's Hermes state, and Overview is
-            // where the "update available" banner shows up. Cheap (reads
-            // ~/.hermes/.update_check), so safe to do here.
             Task { await refreshHermesUpdateAvailability() }
         } catch {
             guard isActiveWorkspace(profile) else { return }
@@ -692,11 +669,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Runs the Hermes Agent installer on the active Orgo connection. Refuses
-    /// when the active connection isn't Orgo or when an install is already
-    /// running. On success, transitions back to .idle and refreshes the
-    /// overview so the install banner disappears and feature panels can
-    /// populate. On failure, captures stderr_tail for the UI to surface.
     @MainActor
     func installHermesOnActiveOrgoConnection() async {
         guard let profile = activeConnection else { return }
@@ -713,14 +685,8 @@ final class AppState: ObservableObject {
                 hermesInstallStatus = .idle
                 setStatusMessage(L10n.string("Hermes Agent installed."))
                 await refreshOverview(manual: true)
-                // Probe version + update availability now that hermes is on the
-                // host. install.sh installs from `main`, so this is normally a
-                // .upToDate, but the cache check is cheap and primes the UI.
                 await refreshHermesUpdateAvailability()
             } else {
-                // Prefer stderr_tail; fall back to stdout_tail because some
-                // installers (and our own clock-sync wrapper) print failure
-                // diagnostics to stdout, not stderr.
                 let stderrTail = result.stderrTail
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let stdoutTail = result.stdoutTail
@@ -750,11 +716,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Probes the active host for the installed Hermes version and whether
-    /// an update is available. Cheap (reads the cache file Hermes itself
-    /// writes); safe to call on every Doctor refresh and after a successful
-    /// install/update. Silently no-ops if no host is active or an update is
-    /// in flight (the in-flight status is the more useful signal).
     @MainActor
     func refreshHermesUpdateAvailability() async {
         guard let profile = activeConnection else { return }
@@ -774,26 +735,14 @@ final class AppState: ObservableObject {
             case .some(let n) where n > 0:
                 hermesUpdateAvailability = .behind(versionLabel: label, commits: n)
             case .some(-1):
-                // Behind, count unknown — `hermes update --check` exited 1
-                // but we didn't parse stdout for an exact number.
                 hermesUpdateAvailability = .behind(versionLabel: label, commits: nil)
             default:
-                // Probe couldn't determine state (no git repo, network
-                // failure on Nix builds, etc.). We still know hermes is
-                // installed; treat as up-to-date so the UI doesn't nag.
                 hermesUpdateAvailability = .upToDate(versionLabel: label)
             }
         } catch {
-            // Don't surface transport errors here — the Doctor tab's
-            // gateway check handles host-unreachable. Leave availability
-            // .unknown so the banner stays hidden.
         }
     }
 
-    /// Runs `hermes update --backup` on the active host. Surfaces a running
-    /// state for the Overview banner / Doctor row spinner; on success
-    /// re-probes availability and the overview so any new version + restarted
-    /// gateway show up immediately.
     @MainActor
     func performHermesUpdate() async {
         guard let profile = activeConnection else { return }
@@ -2167,9 +2116,6 @@ final class AppState: ObservableObject {
         case .terminal:
             ensureTerminalSession()
         case .connections, .desktop, .mail, .messaging, .connectors, .providers, .doctor:
-            // .desktop manages its own VNC lifecycle inside DesktopView.
-            // .mail manages its own AgentMail setup state inside MailView.
-            // .connectors manages its own Composio setup state inside ConnectorsView.
             break
         }
     }
@@ -2209,8 +2155,6 @@ final class AppState: ObservableObject {
     private func reloadSectionAfterScopeChange(_ section: AppSection) async {
         switch section {
         case .connections, .overview, .desktop, .mail, .messaging, .connectors, .providers, .doctor:
-            // Desktop reconnects on its own when the active connection changes.
-            // Mail and Connectors re-evaluate setup state on their own.
             break
         case .files:
             await ensureInitialFileLoads()
@@ -2330,8 +2274,6 @@ final class AppState: ObservableObject {
                         self.applySessionMessages(messages, displays: displays, signature: signature)
                     }
                 } catch {
-                    // Keep polling best-effort; a transient SSH/store read failure
-                    // should not end the in-flight chat turn.
                 }
 
                 try? await Task.sleep(for: .seconds(2))

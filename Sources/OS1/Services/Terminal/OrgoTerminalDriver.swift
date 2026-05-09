@@ -1,9 +1,17 @@
+#if os(macOS)
 import AppKit
+#endif
 import Foundation
+#if os(macOS)
 @preconcurrency import SwiftTerm
+#endif
 
 @MainActor
+#if os(macOS)
 final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
+#else
+final class OrgoTerminalDriver: NSObject, TerminalDriver {
+#endif
     private let computerId: String
     private let orgoTransport: OrgoTransport
     private let hostView: OrgoTerminalHostView
@@ -28,9 +36,13 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
         self.computerId = computerId
         self.orgoTransport = orgoTransport
         self.urlSession = urlSession
+        #if os(macOS)
         self.hostView = OrgoTerminalHostView()
+        #endif
         super.init()
+        #if os(macOS)
         hostView.terminalView.terminalDelegate = self
+        #endif
     }
 
     deinit {
@@ -53,6 +65,7 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
         self.onProcessExit = onProcessExit
     }
 
+    #if os(macOS)
     func mount(
         in container: TerminalMountContainerView,
         appearance: TerminalThemeAppearance,
@@ -68,6 +81,7 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
     func unmount(from container: TerminalMountContainerView) {
         container.unmountHostedView()
     }
+    #endif
 
     nonisolated func terminate() {
         Task { @MainActor [weak self] in
@@ -77,6 +91,7 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
 
     // MARK: - TerminalViewDelegate (user input + resize)
 
+    #if os(macOS)
     nonisolated func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         Task { @MainActor [weak self] in
             self?.handleSizeChanged(cols: newCols, rows: newRows)
@@ -114,6 +129,7 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
     }
 
     nonisolated func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    #endif
 
     // MARK: - Lifecycle helpers
 
@@ -193,12 +209,14 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
     }
 
     private func setActive(_ isActive: Bool) {
+        #if os(macOS)
         hostView.isHidden = !isActive
         if !isActive {
             hostView.window?.makeFirstResponder(nil)
         } else {
             hostView.window?.makeFirstResponder(hostView.terminalView)
         }
+        #endif
     }
 
     @MainActor
@@ -311,7 +329,9 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
     }
 
     private func feedToTerminal(_ bytes: [UInt8]) {
+        #if os(macOS)
         hostView.terminalView.feed(byteArray: bytes[...])
+        #endif
     }
 
     private func feedErrorAndExit(_ text: String) async {
@@ -324,6 +344,7 @@ final class OrgoTerminalDriver: NSObject, TerminalDriver, TerminalViewDelegate {
 
 // MARK: - Host view (TerminalView, not LocalProcessTerminalView)
 
+#if os(macOS)
 @MainActor
 final class OrgoTerminalHostView: NSView {
     let terminalView = SwiftTerm.TerminalView(frame: .zero)
@@ -370,3 +391,4 @@ final class OrgoTerminalHostView: NSView {
         )
     }
 }
+#endif

@@ -1,7 +1,12 @@
+import Foundation
+#if canImport(AppKit)
 import AppKit
+#endif
+#if canImport(SwiftUI)
 import SwiftUI
+#endif
 
-enum TerminalThemeStyle: String, Codable, Equatable {
+public enum TerminalThemeStyle: String, Codable, Equatable {
     case system
     case os1
     case graphite
@@ -11,18 +16,18 @@ enum TerminalThemeStyle: String, Codable, Equatable {
     case custom
 }
 
-struct TerminalThemeColor: Codable, Equatable, Hashable {
-    var red: Double
-    var green: Double
-    var blue: Double
+public struct TerminalThemeColor: Codable, Equatable, Hashable {
+    public var red: Double
+    public var green: Double
+    public var blue: Double
 
-    init(red: Double, green: Double, blue: Double) {
+    public init(red: Double, green: Double, blue: Double) {
         self.red = Self.clamp(red)
         self.green = Self.clamp(green)
         self.blue = Self.clamp(blue)
     }
 
-    init(hex: Int) {
+    public init(hex: Int) {
         self.init(
             red: Double((hex >> 16) & 0xFF) / 255.0,
             green: Double((hex >> 8) & 0xFF) / 255.0,
@@ -30,7 +35,8 @@ struct TerminalThemeColor: Codable, Equatable, Hashable {
         )
     }
 
-    init(nsColor: NSColor) {
+    #if canImport(AppKit)
+    public init(nsColor: NSColor) {
         let resolved = nsColor.usingColorSpace(.deviceRGB) ?? NSColor.black
         self.init(
             red: Double(resolved.redComponent),
@@ -39,7 +45,7 @@ struct TerminalThemeColor: Codable, Equatable, Hashable {
         )
     }
 
-    var nsColor: NSColor {
+    public var nsColor: NSColor {
         NSColor(
             deviceRed: red,
             green: green,
@@ -47,50 +53,58 @@ struct TerminalThemeColor: Codable, Equatable, Hashable {
             alpha: 1
         )
     }
+    #endif
 
-    var swiftUIColor: Color {
-        Color(nsColor: nsColor)
+    #if canImport(SwiftUI)
+    public var swiftUIColor: Color {
+        #if canImport(AppKit)
+        return Color(nsColor: nsColor)
+        #else
+        return Color(red: red, green: green, blue: blue)
+        #endif
     }
+    #endif
 
     private static func clamp(_ value: Double) -> Double {
         min(max(value, 0), 1)
     }
 }
 
-struct TerminalThemePreset: Identifiable, Equatable {
-    let style: TerminalThemeStyle
-    let name: String
-    let summary: String
-    let backgroundColor: TerminalThemeColor
-    let foregroundColor: TerminalThemeColor
-    let ansiPalette: [TerminalThemeColor]
+public struct TerminalThemePreset: Identifiable, Equatable {
+    public let style: TerminalThemeStyle
+    public let name: String
+    public let summary: String
+    public let backgroundColor: TerminalThemeColor
+    public let foregroundColor: TerminalThemeColor
+    public let ansiPalette: [TerminalThemeColor]
 
-    var id: String {
+    public var id: String {
         style.rawValue
     }
 }
 
-struct TerminalThemeAppearance: Equatable {
-    let style: TerminalThemeStyle
-    let name: String
-    let backgroundColor: TerminalThemeColor
-    let foregroundColor: TerminalThemeColor
-    let ansiPalette: [TerminalThemeColor]
-    let paletteStyle: TerminalThemeStyle
-    let isCustom: Bool
+public struct TerminalThemeAppearance: Equatable {
+    public let style: TerminalThemeStyle
+    public let name: String
+    public let backgroundColor: TerminalThemeColor
+    public let foregroundColor: TerminalThemeColor
+    public let ansiPalette: [TerminalThemeColor]
+    public let paletteStyle: TerminalThemeStyle
+    public let isCustom: Bool
 }
 
-struct TerminalThemePreference: Codable, Equatable {
-    var style: TerminalThemeStyle = .os1
-    var customBackgroundColor: TerminalThemeColor?
-    var customForegroundColor: TerminalThemeColor?
-    var paletteStyle: TerminalThemeStyle?
+public struct TerminalThemePreference: Codable, Equatable {
+    public var style: TerminalThemeStyle = .os1
+    public var customBackgroundColor: TerminalThemeColor?
+    public var customForegroundColor: TerminalThemeColor?
+    public var paletteStyle: TerminalThemeStyle?
 
-    static let defaultValue = TerminalThemePreference()
+    public static let defaultValue = TerminalThemePreference()
 
-    var resolvedAppearance: TerminalThemeAppearance {
+    public var resolvedAppearance: TerminalThemeAppearance {
         switch style {
         case .system:
+            #if canImport(AppKit)
             return TerminalThemeAppearance(
                 style: .system,
                 name: "System",
@@ -100,6 +114,9 @@ struct TerminalThemePreference: Codable, Equatable {
                 paletteStyle: .system,
                 isCustom: false
             )
+            #else
+            return Self.os1Preset.resolvedAppearance // Fallback on non-AppKit platforms
+            #endif
         case .custom:
             let basePreset = Self.preset(for: paletteStyle ?? .os1) ?? Self.os1Preset
             return TerminalThemeAppearance(
@@ -125,11 +142,11 @@ struct TerminalThemePreference: Codable, Equatable {
         }
     }
 
-    func selectingPreset(_ style: TerminalThemeStyle) -> TerminalThemePreference {
+    public func selectingPreset(_ style: TerminalThemeStyle) -> TerminalThemePreference {
         TerminalThemePreference(style: style)
     }
 
-    func updatingBackgroundColor(_ color: TerminalThemeColor) -> TerminalThemePreference {
+    public func updatingBackgroundColor(_ color: TerminalThemeColor) -> TerminalThemePreference {
         let appearance = resolvedAppearance
         return TerminalThemePreference(
             style: .custom,
@@ -139,7 +156,7 @@ struct TerminalThemePreference: Codable, Equatable {
         )
     }
 
-    func updatingForegroundColor(_ color: TerminalThemeColor) -> TerminalThemePreference {
+    public func updatingForegroundColor(_ color: TerminalThemeColor) -> TerminalThemePreference {
         let appearance = resolvedAppearance
         return TerminalThemePreference(
             style: .custom,
@@ -149,7 +166,7 @@ struct TerminalThemePreference: Codable, Equatable {
         )
     }
 
-    static let quickPresets: [TerminalThemePreset] = [
+    public static let quickPresets: [TerminalThemePreset] = [
         os1Preset,
         graphitePreset,
         evergreenPreset,
@@ -161,44 +178,24 @@ struct TerminalThemePreference: Codable, Equatable {
         quickPresets.first(where: { $0.style == style })
     }
 
-    /// The signature OS1 terminal — coral surface with cream text,
-    /// ANSI palette tuned to warm-leaning accents (coral red, sage
-    /// green, warm gold, soft warm blue). Uses `coral600` (the
-    /// palette's deepest coral) so the terminal stays in the same
-    /// hue family as the app surface instead of dropping into a
-    /// muddy terracotta brown.
     private static let os1Preset = TerminalThemePreset(
         style: .os1,
         name: "OS1",
-        summary: "Coral surface with cream text and warm ANSI accents — the canonical OS1 terminal.",
-        backgroundColor: TerminalThemeColor(hex: 0xA84832),  // matches palette.coral600
-        foregroundColor: TerminalThemeColor(hex: 0xF5EBE0),  // warm cream
+        summary: "Coral surface with cream text.",
+        backgroundColor: TerminalThemeColor(hex: 0xA84832),
+        foregroundColor: TerminalThemeColor(hex: 0xF5EBE0),
         ansiPalette: palette([
-            // Standard 0–7
-            0x2A1810,  // black — deep warm brown
-            0xE6745A,  // red — bright coral (the brand color, lifted for legibility on terracotta)
-            0x9CC089,  // green — warm sage
-            0xE6CB94,  // yellow — warm gold
-            0x9DBED9,  // blue — soft warm blue
-            0xC4A4DC,  // magenta — warm purple
-            0x9ACECE,  // cyan — warm teal
-            0xF0E5D4,  // white — cream
-            // Bright 8–15
-            0x4A2820,  // bright black — lighter cocoa
-            0xF08C7A,  // bright red — softer coral
-            0xB8D5A8,  // bright green
-            0xF2DBA8,  // bright yellow
-            0xB6CFE5,  // bright blue
-            0xD3BBE6,  // bright magenta
-            0xB8DBDB,  // bright cyan
-            0xFFFAF0   // bright white
+            0x2A1810, 0xE6745A, 0x9CC089, 0xE6CB94,
+            0x9DBED9, 0xC4A4DC, 0x9ACECE, 0xF0E5D4,
+            0x4A2820, 0xF08C7A, 0xB8D5A8, 0xF2DBA8,
+            0xB6CFE5, 0xD3BBE6, 0xB8DBDB, 0xFFFAF0
         ])
     )
 
     private static let graphitePreset = TerminalThemePreset(
         style: .graphite,
         name: "Graphite",
-        summary: "Neutral dark theme with high contrast and quiet ANSI accents.",
+        summary: "Neutral dark theme.",
         backgroundColor: TerminalThemeColor(hex: 0x12161D),
         foregroundColor: TerminalThemeColor(hex: 0xE7ECF3),
         ansiPalette: palette([
@@ -212,7 +209,7 @@ struct TerminalThemePreference: Codable, Equatable {
     private static let evergreenPreset = TerminalThemePreset(
         style: .evergreen,
         name: "Evergreen",
-        summary: "Deep forest backdrop with calm greens and warm highlights.",
+        summary: "Deep forest backdrop.",
         backgroundColor: TerminalThemeColor(hex: 0x0F1714),
         foregroundColor: TerminalThemeColor(hex: 0xDBE8E1),
         ansiPalette: palette([
@@ -226,7 +223,7 @@ struct TerminalThemePreference: Codable, Equatable {
     private static let duskPreset = TerminalThemePreset(
         style: .dusk,
         name: "Dusk",
-        summary: "Cool navy tones that stay readable for long SSH sessions.",
+        summary: "Cool navy tones.",
         backgroundColor: TerminalThemeColor(hex: 0x101726),
         foregroundColor: TerminalThemeColor(hex: 0xDDE7F7),
         ansiPalette: palette([
@@ -240,7 +237,7 @@ struct TerminalThemePreference: Codable, Equatable {
     private static let paperPreset = TerminalThemePreset(
         style: .paper,
         name: "Paper",
-        summary: "Light, editorial theme for daytime work and quiet rooms.",
+        summary: "Light, editorial theme.",
         backgroundColor: TerminalThemeColor(hex: 0xF5F1E8),
         foregroundColor: TerminalThemeColor(hex: 0x2F3743),
         ansiPalette: palette([
@@ -260,5 +257,19 @@ struct TerminalThemePreference: Codable, Equatable {
 
     private static func palette(_ hexValues: [Int]) -> [TerminalThemeColor] {
         hexValues.map(TerminalThemeColor.init(hex:))
+    }
+}
+
+extension TerminalThemePreset {
+    public var resolvedAppearance: TerminalThemeAppearance {
+        TerminalThemeAppearance(
+            style: style,
+            name: name,
+            backgroundColor: backgroundColor,
+            foregroundColor: foregroundColor,
+            ansiPalette: ansiPalette,
+            paletteStyle: style,
+            isCustom: false
+        )
     }
 }

@@ -1,42 +1,14 @@
 import Foundation
-import Security
 
-/// Per-Mac Keychain wrapper for the user's Composio Connect API key(s).
-///
-/// Credentials are scoped per `ConnectionProfile.id` so switching to a
-/// different host automatically reads that host's key — never leaks one
-/// connection's credential into another connection's
-/// VM. A Mac-level "default" slot persists for users with a single
-/// Composio account they share across their own VMs (most common case)
-/// so they don't have to paste once per host.
-///
-/// Resolution order on read:
-///   1. Profile-scoped slot (`<profileId>` Keychain account) — strict per-host
-///   2. Default slot (`default` Keychain account) — Mac-level fallback
-///
-/// Writes always target a specific slot. The view-models choose:
-///   - `saveAPIKey(_, forProfileId:)` for a host-specific paste/import
-///   - `saveAsDefault(_)` for "make this my default" (UI flag, future)
+/// Per-Mac wrapper for the user's Composio Connect API key(s).
 final class ComposioCredentialStore: @unchecked Sendable {
-    enum CredentialError: LocalizedError {
-        case saveFailed(OSStatus)
-        case deleteFailed(OSStatus)
-
-        var errorDescription: String? {
-            switch self {
-            case .saveFailed(let status):
-                return "Couldn't save the Composio API key to Keychain (status \(status))."
-            case .deleteFailed(let status):
-                return "Couldn't remove the Composio API key from Keychain (status \(status))."
-            }
-        }
-    }
-
     static let defaultAccount = "default"
 
+    private let store: any CredentialStore
     private let service: String
 
-    init(service: String = "dev.composio.connect.api-key") {
+    init(store: any CredentialStore, service: String = "dev.composio.connect.api-key") {
+        self.store = store
         self.service = service
     }
 
@@ -58,8 +30,6 @@ final class ComposioCredentialStore: @unchecked Sendable {
     }
 
     /// True if there's a profile-scoped key (regardless of default).
-    /// Lets the UI distinguish "this host has its own key" from "we're
-    /// just using the Mac-level default."
     func hasProfileScopedKey(profileId: String) -> Bool {
         readKey(account: profileId) != nil
     }
@@ -90,63 +60,14 @@ final class ComposioCredentialStore: @unchecked Sendable {
     // MARK: - Internals
 
     private func readKey(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let key = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        store.load(service: service, account: account)
     }
 
     private func saveKey(_ apiKey: String, account: String) throws {
-        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            try deleteKey(account: account)
-            return
-        }
-        let data = Data(trimmed.utf8)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        switch updateStatus {
-        case errSecSuccess:
-            return
-        case errSecItemNotFound:
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw CredentialError.saveFailed(addStatus)
-            }
-        default:
-            throw CredentialError.saveFailed(updateStatus)
-        }
+        try store.save(apiKey, service: service, account: account)
     }
 
     private func deleteKey(account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        if status != errSecSuccess && status != errSecItemNotFound {
-            throw CredentialError.deleteFailed(status)
-        }
+        try store.delete(service: service, account: account)
     }
 }

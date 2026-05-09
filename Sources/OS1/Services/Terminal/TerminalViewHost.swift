@@ -1,9 +1,17 @@
+#if os(macOS)
 import AppKit
+#endif
 import Foundation
+#if os(macOS)
 @preconcurrency import SwiftTerm
+#endif
 
 @MainActor
+#if os(macOS)
 final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalViewDelegate {
+#else
+final class TerminalViewHost: NSObject, TerminalDriver {
+#endif
     private let sshArguments: [String]
     private let hostView = TerminalHostView()
     private var startedLaunchToken: UUID?
@@ -17,7 +25,9 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
     init(sshArguments: [String]) {
         self.sshArguments = sshArguments
         super.init()
+        #if os(macOS)
         hostView.terminalView.processDelegate = self
+        #endif
     }
 
     func setEventHandlers(
@@ -32,6 +42,7 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
         self.onProcessExit = onProcessExit
     }
 
+    #if os(macOS)
     func mount(
         in container: TerminalMountContainerView,
         appearance: TerminalThemeAppearance,
@@ -47,11 +58,15 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
     func unmount(from container: TerminalMountContainerView) {
         container.unmountHostedView()
     }
+    #endif
 
     nonisolated func terminate() {
+        #if os(macOS)
         performSelector(onMainThread: #selector(terminateOnMainThread), with: nil, waitUntilDone: false)
+        #endif
     }
 
+    #if os(macOS)
     nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
 
     nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
@@ -87,6 +102,7 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
         guard startedLaunchToken != launchToken else { return }
         startedLaunchToken = launchToken
 
+        #if os(macOS)
         let environment = [
             "TERM=xterm-256color",
             "COLORTERM=truecolor"
@@ -98,24 +114,30 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
             environment: environment,
             execName: "ssh"
         )
+        #endif
         onProcessStart?()
     }
 
     private func applyAppearance(_ appearance: TerminalThemeAppearance) {
+        #if os(macOS)
         guard appliedAppearance != appearance else { return }
         appliedAppearance = appearance
         hostView.apply(appearance: appearance)
+        #endif
     }
 
     private func setActive(_ isActive: Bool) {
+        #if os(macOS)
         hostView.isHidden = !isActive
         if !isActive {
             hostView.window?.makeFirstResponder(nil)
         } else {
             hostView.window?.makeFirstResponder(hostView.terminalView)
         }
+        #endif
     }
 
+    #if os(macOS)
     @MainActor
     @objc
     private func terminateOnMainThread() {
@@ -123,8 +145,10 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
         startedLaunchToken = nil
         hostView.terminalView.terminate()
     }
+    #endif
 }
 
+#if os(macOS)
 final class TerminalMountContainerView: NSView {
     private weak var hostedView: NSView?
     private var hostedConstraints: [NSLayoutConstraint] = []
@@ -226,3 +250,4 @@ final class TerminalHostView: NSView {
         )
     }
 }
+#endif
